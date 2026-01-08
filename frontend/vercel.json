@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://backend-psi-six-61.vercel.app/api/:path*"
+    }
+  ]
+}

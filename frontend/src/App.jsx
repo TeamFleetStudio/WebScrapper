@@ -34,9 +34,11 @@ function App() {
       }
     } catch (err) {
       if (err.response?.data?.errors) {
-        setError(err.response.data.errors.join(', '));
+        const errors = err.response.data.errors;
+        setError(Array.isArray(errors) ? errors.join(', ') : String(errors));
       } else if (err.response?.data?.error) {
-        setError(err.response.data.error);
+        const error = err.response.data.error;
+        setError(typeof error === 'object' ? (error.message || JSON.stringify(error)) : String(error));
       } else {
         setError(err.message || 'An error occurred while scraping');
       }
