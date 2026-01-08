@@ -1,7 +1,13 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { URL } = require('url');
+const https = require('https');
 const AppError = require('../utils/AppError');
+
+// Create HTTPS agent that ignores certificate errors
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false
+});
 
 class ScraperService {
   constructor(options = {}) {
@@ -40,6 +46,12 @@ class ScraperService {
       
       if (error.code === 'ECONNREFUSED') {
         throw new AppError('Connection refused. The website may be down.', 503);
+      }
+
+      if (error.code === 'CERT_HAS_EXPIRED' || error.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' || 
+          error.code === 'SELF_SIGNED_CERT_IN_CHAIN' || error.code === 'ERR_TLS_CERT_ALTNAME_INVALID' ||
+          error.message.includes('certificate')) {
+        throw new AppError('SSL certificate error. The website has an invalid certificate.', 400);
       }
 
       if (error.message.includes('Invalid URL')) {
@@ -103,6 +115,7 @@ class ScraperService {
   async scrapePage(url) {
     const response = await axios.get(url, {
       timeout: this.timeout,
+      httpsAgent: httpsAgent,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
