@@ -2,6 +2,8 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const { URL } = require('url');
 const https = require('https');
+const puppeteer = require('puppeteer-core');
+const chromium = require('@sparticuz/chromium');
 const AppError = require('../utils/AppError');
 
 // Create HTTPS agent that ignores certificate errors
@@ -12,10 +14,32 @@ const httpsAgent = new https.Agent({
 class ScraperService {
   constructor(options = {}) {
     this.maxPages = options.maxPages || 5;
-    this.timeout = options.timeout || 10000;
+    this.timeout = options.timeout || 30000;
     this.visitedUrls = new Set();
     this.baseUrl = null;
     this.baseDomain = null;
+    this.browser = null;
+    this.usePuppeteer = false;
+  }
+
+  async getBrowser() {
+    if (!this.browser) {
+      this.browser = await puppeteer.launch({
+        args: chromium.args,
+        defaultViewport: chromium.defaultViewport,
+        executablePath: await chromium.executablePath(),
+        headless: chromium.headless,
+        ignoreHTTPSErrors: true
+      });
+    }
+    return this.browser;
+  }
+
+  async closeBrowser() {
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = null;
+    }
   }
 
   async scrape(url) {
@@ -24,7 +48,20 @@ class ScraperService {
       this.baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}`;
       this.baseDomain = parsedUrl.host;
 
-      const pages = await this.crawlPages(url);
+      // First try with axios (faster)
+      let pages;
+      try {
+        this.usePuppeteer = false;
+        pages = await this.crawlPages(url);
+      } catch (axiosError) {
+        // If blocked (403, Cloudflare, etc.), retry with Puppeteer
+        console.log('Axios failed, trying with Puppeteer for Cloudflare bypass...');
+        this.usePuppeteer = true;
+        this.visitedUrls.clear();
+        pages = await this.crawlPages(url);
+        await this.closeBrowser();
+      }
+
       const siteTitle = pages.length > 0 ? pages[0].title : '';
 
       return {
@@ -36,6 +73,8 @@ class ScraperService {
       };
 
     } catch (error) {
+      await this.closeBrowser();
+      
       if (error instanceof AppError) {
         throw error;
       }
@@ -113,6 +152,35 @@ class ScraperService {
   }
 
   async scrapePage(url) {
+    let html;
+    
+    if (this.usePuppeteer) {
+      html = await this.scrapeWithPuppeteer(url);
+    } else {
+      html = await this.scrapeWithAxios(url);
+    }
+
+    if (!html) return null;
+
+    const $ = cheerio.load(html);
+    const parsedUrl = new URL(url);
+
+    const pageData = {
+      url: parsedUrl.pathname || '/',
+      fullUrl: url,
+      title: this.extractTitle($),
+      metaDescription: this.extractMetaDescription($),
+      headings: this.extractHeadings($),
+      content: this.extractContent($),
+      images: this.extractImages($, url),
+      internalLinks: this.extractInternalLinks($, url),
+      externalLinks: this.extractExternalLinks($, url)
+    };
+
+    return pageData;
+  }
+
+  async scrapeWithAxios(url) {
     const response = await axios.get(url, {
       timeout: this.timeout,
       httpsAgent: httpsAgent,
@@ -140,22 +208,58 @@ class ScraperService {
       return null;
     }
 
-    const $ = cheerio.load(response.data);
-    const parsedUrl = new URL(url);
+    // Check for Cloudflare challenge page
+    if (response.data.includes('cf-browser-verification') || 
+        response.data.includes('cf_clearance') ||
+        response.data.includes('Checking your browser') ||
+        response.data.includes('Just a moment...')) {
+      throw new Error('Cloudflare protection detected');
+    }
 
-    const pageData = {
-      url: parsedUrl.pathname || '/',
-      fullUrl: url,
-      title: this.extractTitle($),
-      metaDescription: this.extractMetaDescription($),
-      headings: this.extractHeadings($),
-      content: this.extractContent($),
-      images: this.extractImages($, url),
-      internalLinks: this.extractInternalLinks($, url),
-      externalLinks: this.extractExternalLinks($, url)
-    };
+    return response.data;
+  }
 
-    return pageData;
+  async scrapeWithPuppeteer(url) {
+    const browser = await this.getBrowser();
+    const page = await browser.newPage();
+
+    try {
+      // Set a realistic viewport
+      await page.setViewport({ width: 1920, height: 1080 });
+
+      // Set user agent
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+      // Set extra headers
+      await page.setExtraHTTPHeaders({
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+      });
+
+      // Navigate to the page and wait for it to load
+      await page.goto(url, {
+        waitUntil: 'networkidle2',
+        timeout: this.timeout
+      });
+
+      // Wait additional time for Cloudflare challenge to complete
+      await page.waitForTimeout(3000);
+
+      // Check if still on Cloudflare page
+      const content = await page.content();
+      if (content.includes('Checking your browser') || content.includes('Just a moment...')) {
+        // Wait more for the challenge to resolve
+        await page.waitForTimeout(5000);
+      }
+
+      const html = await page.content();
+      await page.close();
+
+      return html;
+    } catch (error) {
+      await page.close();
+      throw error;
+    }
   }
 
   extractTitle($) {
