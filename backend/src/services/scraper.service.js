@@ -32,10 +32,32 @@ class ScraperService {
 
   async getBrowser() {
     if (!this.browser) {
+      const stealthArgs = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-features=IsolateOrigins,site-per-process',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--disable-gpu',
+        '--window-size=1920,1080',
+        '--start-maximized',
+        '--hide-scrollbars',
+        '--mute-audio',
+        '--disable-background-networking',
+        '--disable-default-apps',
+        '--disable-extensions',
+        '--disable-sync',
+        '--disable-translate',
+        '--metrics-recording-only',
+        '--no-first-run',
+        '--safebrowsing-disable-auto-update'
+      ];
+
       if (isVercel) {
         // Serverless environment (Vercel)
         this.browser = await puppeteer.launch({
-          args: chromium.args,
+          args: [...chromium.args, ...stealthArgs],
           defaultViewport: chromium.defaultViewport,
           executablePath: await chromium.executablePath(),
           headless: chromium.headless,
@@ -48,7 +70,7 @@ class ScraperService {
           this.browser = await localPuppeteer.launch({
             headless: 'new',
             ignoreHTTPSErrors: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            args: stealthArgs
           });
         } catch (e) {
           console.log('Puppeteer not available locally, skipping browser-based scraping');
@@ -245,9 +267,43 @@ class ScraperService {
 
   async scrapeWithPuppeteer(url) {
     const browser = await this.getBrowser();
+    if (!browser) {
+      throw new Error('Browser not available');
+    }
     const page = await browser.newPage();
 
     try {
+      // Stealth mode - hide automation indicators
+      await page.evaluateOnNewDocument(() => {
+        // Override webdriver property
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined,
+        });
+        
+        // Override plugins
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => [1, 2, 3, 4, 5],
+        });
+        
+        // Override languages
+        Object.defineProperty(navigator, 'languages', {
+          get: () => ['en-US', 'en'],
+        });
+        
+        // Override chrome property
+        window.chrome = {
+          runtime: {},
+        };
+        
+        // Override permissions
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+          parameters.name === 'notifications' ?
+            Promise.resolve({ state: Notification.permission }) :
+            originalQuery(parameters)
+        );
+      });
+
       // Set a realistic viewport
       await page.setViewport({ width: 1920, height: 1080 });
 
@@ -257,7 +313,10 @@ class ScraperService {
       // Set extra headers
       await page.setExtraHTTPHeaders({
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"'
       });
 
       // Navigate to the page and wait for it to load
@@ -266,14 +325,24 @@ class ScraperService {
         timeout: this.timeout
       });
 
-      // Wait additional time for Cloudflare challenge to complete
-      await page.waitForTimeout(3000);
+      // Wait for page to fully load and any JS to execute
+      await new Promise(resolve => setTimeout(resolve, 5000));
 
-      // Check if still on Cloudflare page
+      // Scroll down to trigger lazy loading
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight / 2);
+      });
+      
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Check if blocked or on challenge page
       const content = await page.content();
-      if (content.includes('Checking your browser') || content.includes('Just a moment...')) {
+      if (content.includes('Checking your browser') || 
+          content.includes('Just a moment...') ||
+          content.includes('Access Denied') ||
+          content.includes('403 Forbidden')) {
         // Wait more for the challenge to resolve
-        await page.waitForTimeout(5000);
+        await new Promise(resolve => setTimeout(resolve, 8000));
       }
 
       const html = await page.content();
