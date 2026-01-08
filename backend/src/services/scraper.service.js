@@ -101,7 +101,7 @@ class ScraperService {
     }
 
     if (username) {
-      // Use LeetCode's public GraphQL API
+      // Use LeetCode's public GraphQL API with proper cookie handling
       const graphqlUrl = 'https://leetcode.com/graphql';
       
       const query = `
@@ -120,7 +120,7 @@ class ScraperService {
               countryName
               skillTags
             }
-            submitStats: submitStatsGlobal {
+            submitStatsGlobal {
               acSubmissionNum {
                 difficulty
                 count
@@ -136,6 +136,27 @@ class ScraperService {
       `;
 
       try {
+        // First, get a CSRF token by visiting the site
+        const sessionResponse = await axios.get('https://leetcode.com', {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          },
+          timeout: 15000,
+          httpsAgent: httpsAgent
+        });
+
+        // Extract cookies from response
+        const cookies = sessionResponse.headers['set-cookie'] || [];
+        const cookieString = cookies.map(c => c.split(';')[0]).join('; ');
+        
+        // Extract CSRF token
+        let csrfToken = '';
+        const csrfMatch = cookieString.match(/csrftoken=([^;]+)/);
+        if (csrfMatch) {
+          csrfToken = csrfMatch[1];
+        }
+
         const response = await axios.post(graphqlUrl, {
           query,
           variables: { username }
@@ -143,20 +164,25 @@ class ScraperService {
           headers: {
             'Content-Type': 'application/json',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://leetcode.com',
-            'Origin': 'https://leetcode.com'
+            'Referer': `https://leetcode.com/u/${username}/`,
+            'Origin': 'https://leetcode.com',
+            'Cookie': cookieString,
+            'x-csrftoken': csrfToken
           },
-          timeout: this.timeout
+          timeout: this.timeout,
+          httpsAgent: httpsAgent
         });
 
         const userData = response.data?.data?.matchedUser;
         
         if (!userData) {
-          throw new AppError('LeetCode user not found.', 404);
+          // Try alternate approach with Puppeteer
+          console.log('GraphQL returned no data, trying Puppeteer approach...');
+          return await this.scrapeLeetCodeWithPuppeteer(url, parsedUrl, username);
         }
 
         const profile = userData.profile || {};
-        const stats = userData.submitStats?.acSubmissionNum || [];
+        const stats = userData.submitStatsGlobal?.acSubmissionNum || [];
         
         // Format the data as a page
         const content = [];
@@ -200,12 +226,83 @@ class ScraperService {
       } catch (error) {
         if (error instanceof AppError) throw error;
         console.error('LeetCode API error:', error.message);
-        throw new AppError('Failed to fetch LeetCode profile. The user may not exist or the service is temporarily unavailable.', 503);
+        // Try Puppeteer as fallback
+        return await this.scrapeLeetCodeWithPuppeteer(url, parsedUrl, username);
       }
     }
 
     // If not a user profile, try regular scraping
     throw new AppError('LeetCode pages other than user profiles cannot be scraped due to heavy JavaScript rendering.', 400);
+  }
+
+  // Fallback: Scrape LeetCode with Puppeteer
+  async scrapeLeetCodeWithPuppeteer(url, parsedUrl, username) {
+    try {
+      const browser = await this.getBrowser();
+      if (!browser) {
+        throw new AppError('Browser not available for LeetCode scraping.', 503);
+      }
+      
+      const page = await browser.newPage();
+      
+      // Stealth mode
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        window.chrome = { runtime: {} };
+      });
+
+      await page.setViewport({ width: 1920, height: 1080 });
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      
+      // Wait for the profile to load
+      await new Promise(resolve => setTimeout(resolve, 5000));
+
+      // Try to extract data from the page
+      const pageData = await page.evaluate(() => {
+        const getText = (selector) => {
+          const el = document.querySelector(selector);
+          return el ? el.textContent.trim() : '';
+        };
+        
+        const getAllText = (selector) => {
+          return Array.from(document.querySelectorAll(selector)).map(el => el.textContent.trim());
+        };
+
+        return {
+          title: document.title,
+          headings: getAllText('h1, h2, h3').slice(0, 20),
+          content: Array.from(document.querySelectorAll('p, div.text-label-1, span.text-label-1')).map(el => el.textContent.trim()).filter(t => t.length > 10).slice(0, 50),
+          bodyText: document.body.innerText.substring(0, 5000)
+        };
+      });
+
+      await page.close();
+      await this.closeBrowser();
+
+      return {
+        siteTitle: pageData.title || `${username} - LeetCode Profile`,
+        baseUrl: 'https://leetcode.com',
+        scrapedAt: new Date().toISOString(),
+        totalPages: 1,
+        pages: [{
+          url: parsedUrl.pathname,
+          fullUrl: url,
+          title: pageData.title || `${username} - LeetCode Profile`,
+          metaDescription: `LeetCode profile for ${username}`,
+          headings: pageData.headings.map(text => ({ level: 'h2', text })),
+          content: pageData.content.length > 0 ? pageData.content : [pageData.bodyText],
+          images: [],
+          internalLinks: [],
+          externalLinks: []
+        }]
+      };
+    } catch (error) {
+      await this.closeBrowser();
+      console.error('Puppeteer LeetCode error:', error.message);
+      throw new AppError('Failed to scrape LeetCode profile. Please try again later.', 503);
+    }
   }
 
   async scrape(url) {
