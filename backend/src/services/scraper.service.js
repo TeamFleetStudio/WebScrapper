@@ -88,11 +88,136 @@ class ScraperService {
     }
   }
 
+  // Special handler for LeetCode using their GraphQL API
+  async scrapeLeetCode(url, parsedUrl) {
+    // Extract username from URL like /u/username/ or /username/
+    const pathParts = parsedUrl.pathname.split('/').filter(p => p);
+    let username = null;
+    
+    if (pathParts[0] === 'u' && pathParts[1]) {
+      username = pathParts[1];
+    } else if (pathParts[0] && !['problems', 'contest', 'discuss', 'explore'].includes(pathParts[0])) {
+      username = pathParts[0];
+    }
+
+    if (username) {
+      // Use LeetCode's public GraphQL API
+      const graphqlUrl = 'https://leetcode.com/graphql';
+      
+      const query = `
+        query userPublicProfile($username: String!) {
+          matchedUser(username: $username) {
+            username
+            profile {
+              realName
+              aboutMe
+              userAvatar
+              reputation
+              ranking
+              company
+              school
+              websites
+              countryName
+              skillTags
+            }
+            submitStats: submitStatsGlobal {
+              acSubmissionNum {
+                difficulty
+                count
+                submissions
+              }
+            }
+            badges {
+              name
+              icon
+            }
+          }
+        }
+      `;
+
+      try {
+        const response = await axios.post(graphqlUrl, {
+          query,
+          variables: { username }
+        }, {
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://leetcode.com',
+            'Origin': 'https://leetcode.com'
+          },
+          timeout: this.timeout
+        });
+
+        const userData = response.data?.data?.matchedUser;
+        
+        if (!userData) {
+          throw new AppError('LeetCode user not found.', 404);
+        }
+
+        const profile = userData.profile || {};
+        const stats = userData.submitStats?.acSubmissionNum || [];
+        
+        // Format the data as a page
+        const content = [];
+        if (profile.aboutMe) content.push(profile.aboutMe);
+        if (profile.company) content.push(`Company: ${profile.company}`);
+        if (profile.school) content.push(`School: ${profile.school}`);
+        if (profile.countryName) content.push(`Country: ${profile.countryName}`);
+        
+        // Add problem stats
+        stats.forEach(stat => {
+          content.push(`${stat.difficulty}: ${stat.count} problems solved (${stat.submissions} submissions)`);
+        });
+
+        return {
+          siteTitle: `${userData.username} - LeetCode Profile`,
+          baseUrl: 'https://leetcode.com',
+          scrapedAt: new Date().toISOString(),
+          totalPages: 1,
+          pages: [{
+            url: parsedUrl.pathname,
+            fullUrl: url,
+            title: `${userData.username} - LeetCode Profile`,
+            metaDescription: profile.aboutMe || `LeetCode profile for ${userData.username}`,
+            headings: [
+              { level: 'h1', text: userData.username },
+              { level: 'h2', text: `Ranking: #${profile.ranking || 'N/A'}` },
+              { level: 'h2', text: `Reputation: ${profile.reputation || 0}` }
+            ],
+            content,
+            images: profile.userAvatar ? [{ src: profile.userAvatar, alt: 'Profile Avatar' }] : [],
+            internalLinks: [],
+            externalLinks: profile.websites || [],
+            leetcodeData: {
+              username: userData.username,
+              profile,
+              stats,
+              badges: userData.badges || []
+            }
+          }]
+        };
+      } catch (error) {
+        if (error instanceof AppError) throw error;
+        console.error('LeetCode API error:', error.message);
+        throw new AppError('Failed to fetch LeetCode profile. The user may not exist or the service is temporarily unavailable.', 503);
+      }
+    }
+
+    // If not a user profile, try regular scraping
+    throw new AppError('LeetCode pages other than user profiles cannot be scraped due to heavy JavaScript rendering.', 400);
+  }
+
   async scrape(url) {
     try {
       const parsedUrl = new URL(url);
       this.baseUrl = `${parsedUrl.protocol}//${parsedUrl.host}`;
       this.baseDomain = parsedUrl.host;
+
+      // Special handling for LeetCode
+      if (parsedUrl.host.includes('leetcode.com')) {
+        return await this.scrapeLeetCode(url, parsedUrl);
+      }
 
       // First try with axios (faster)
       let pages;
