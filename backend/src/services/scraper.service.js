@@ -2,9 +2,17 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const { URL } = require('url');
 const https = require('https');
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
 const AppError = require('../utils/AppError');
+
+// Conditional Puppeteer imports for serverless vs local
+let puppeteer;
+let chromium;
+const isVercel = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME;
+
+if (isVercel) {
+  puppeteer = require('puppeteer-core');
+  chromium = require('@sparticuz/chromium');
+}
 
 // Create HTTPS agent that ignores certificate errors
 const httpsAgent = new https.Agent({
@@ -24,13 +32,29 @@ class ScraperService {
 
   async getBrowser() {
     if (!this.browser) {
-      this.browser = await puppeteer.launch({
-        args: chromium.args,
-        defaultViewport: chromium.defaultViewport,
-        executablePath: await chromium.executablePath(),
-        headless: chromium.headless,
-        ignoreHTTPSErrors: true
-      });
+      if (isVercel) {
+        // Serverless environment (Vercel)
+        this.browser = await puppeteer.launch({
+          args: chromium.args,
+          defaultViewport: chromium.defaultViewport,
+          executablePath: await chromium.executablePath(),
+          headless: chromium.headless,
+          ignoreHTTPSErrors: true
+        });
+      } else {
+        // Local development - use puppeteer with system Chrome or skip
+        try {
+          const localPuppeteer = require('puppeteer');
+          this.browser = await localPuppeteer.launch({
+            headless: 'new',
+            ignoreHTTPSErrors: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+          });
+        } catch (e) {
+          console.log('Puppeteer not available locally, skipping browser-based scraping');
+          return null;
+        }
+      }
     }
     return this.browser;
   }

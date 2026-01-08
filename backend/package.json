@@ -26,6 +26,7 @@
     "@sparticuz/chromium": "^119.0.2"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "puppeteer": "^21.6.1"
   }
 }
