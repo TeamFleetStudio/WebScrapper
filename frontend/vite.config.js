@@ -7,9 +7,10 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'https://backend-psi-six-61.vercel.app',
+        target: 'https://gab-on-scraper-backend-latest.onrender.com/api/scrape',
         changeOrigin: true
       }
     }
   }
+
 });
